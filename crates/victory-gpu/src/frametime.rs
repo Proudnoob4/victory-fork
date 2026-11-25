@@ -98,7 +98,8 @@ cpu_prepare_ms,gpu_ms,gpu_pct,copies_ms,copies_mb,textures_ms,textures_mb,\
 copyback_ms,copyback_mb,draws,dropped,making,indirect,heap_passes,heap_ms,\
 texture_refresh_ms,card_passes,card_compares,card_sent_mb,card_ranges,\
 card_pieces,card_fetched,card_fetched_mb,card_waits,card_wait_ms,\
-twins_into_depth,twins_into_colour,depth_planes,ram_mb,cpu_pct\n";
+twins_into_depth,twins_into_colour,depth_planes,ram_mb,cpu_pct,\
+card_idle_ms,card_busy_pct\n";
 
 /// The `#` block a dump starts with: the machine and the switches, so a file
 /// from another PC can be compared and reproduced. `pandas.read_csv(...,
@@ -163,6 +164,11 @@ fn metadata() -> &'static str {
                 out.push_str(&format!("# display: {w}x{h}\n"));
             }
         }
+        out.push_str(&format!(
+            "# build: {}\n",
+            if cfg!(feature = "diagnostics") { "diagnostics" } else { "release" }
+        ));
+        out.push_str(&format!("# overlap: {}\n", crate::host::overlap_summary()));
         let mut switches: Vec<String> = std::env::vars()
             .filter(|(key, value)| key.starts_with("VICTORY_") && !value.is_empty())
             .map(|(key, value)| format!("{key}={value}"))
@@ -359,6 +365,10 @@ pub(crate) struct Row {
     pub depth_planes: f64,
     pub ram_mb: f64,
     pub cpu_pct: f64,
+    /// The card's time with nothing of ours queued, from the card clock
+    /// (not `gpu_ms`, which is the submitting thread's wait for the card).
+    pub card_idle_ms: f64,
+    pub card_busy_pct: f64,
 }
 
 /// Appends `r` when the dump is on.
@@ -369,9 +379,15 @@ pub(crate) fn record(r: &Row) {
     let t_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
+    let line = row_line(t_ms, r);
     let mut file = file.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = writeln!(
-        file,
+    let _ = writeln!(file, "{line}");
+    let _ = file.flush();
+}
+
+/// One CSV line for `r`, in the order of [`HEADER`].
+fn row_line(t_ms: u128, r: &Row) -> String {
+    format!(
         "{t_ms},{frame},{frames:.3},{fps:.3},{ms:.3},{max:.3},{avg:.3},\
          {cpu:.3},{gpu:.3},{gpu_pct:.3},{copies_ms:.3},{copies_mb:.3},\
          {textures_ms:.3},{textures_mb:.3},{copyback_ms:.3},{copyback_mb:.3},\
@@ -379,7 +395,7 @@ pub(crate) fn record(r: &Row) {
          {texture_refresh_ms:.3},{card_passes:.3},{card_compares:.3},{card_sent_mb:.3},\
          {card_ranges:.3},{card_pieces:.3},{card_fetched:.3},{card_fetched_mb:.3},\
          {card_waits:.3},{card_wait_ms:.3},{twins_into_depth:.3},{twins_into_colour:.3},\
-         {depth_planes:.3},{ram_mb:.3},{cpu_pct:.3}",
+         {depth_planes:.3},{ram_mb:.3},{cpu_pct:.3},{card_idle_ms:.3},{card_busy_pct:.3}",
         frame = r.frame,
         frames = r.frames,
         fps = r.fps,
@@ -416,6 +432,20 @@ pub(crate) fn record(r: &Row) {
         depth_planes = r.depth_planes,
         ram_mb = r.ram_mb,
         cpu_pct = r.cpu_pct,
-    );
-    let _ = file.flush();
+        card_idle_ms = r.card_idle_ms,
+        card_busy_pct = r.card_busy_pct,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_row_has_as_many_columns_as_the_header() {
+        let header = HEADER.trim_end().split(',').count();
+        let row = row_line(0, &Row::default()).split(',').count();
+        assert_eq!(header, row);
+        assert!(HEADER.trim_end().ends_with("card_idle_ms,card_busy_pct"));
+    }
 }

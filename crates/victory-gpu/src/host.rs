@@ -459,15 +459,17 @@ fn card_clock_watch(clock: &'static CardClock) {
 }
 
 /// For the frame-rate line: [`CARD_CLOCK_US`] per frame, `ms` being the
-/// frame's time.
-fn card_clock_line(frames: f64, ms: f64) {
+/// frame's time. Returns the card's idle ms per frame and its busy percent,
+/// for the frametime dump.
+fn card_clock_line(frames: f64, ms: f64) -> (f64, f64) {
     let [idle, behind, stood] = [0, 1, 2].map(|i| CARD_CLOCK_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
+    let busy = if ms > 0.0 { (100.0 * (1.0 - idle / ms)).clamp(0.0, 100.0) } else { 0.0 };
     tracing::info!(
-        "the card's clock per frame: nothing of ours queued {idle:.1} ms (the card about {:.0}% busy by this count), \
+        "the card's clock per frame: nothing of ours queued {idle:.1} ms (the card about {busy:.0}% busy by this count), \
          {behind:.1} ms of that while the submitting thread was working (the card idle behind us), the rest while the title \
-         had not submitted; the submitting thread stood waiting for the card {stood:.1} ms",
-        if ms > 0.0 { (100.0 * (1.0 - idle / ms)).clamp(0.0, 100.0) } else { 0.0 }
+         had not submitted; the submitting thread stood waiting for the card {stood:.1} ms"
     );
+    (idle, busy)
 }
 
 /// Of the preparing: title memory copies (microseconds, bytes) and texture
@@ -1895,6 +1897,23 @@ fn relay_exact() -> bool {
     // since the walls of the first room were found drawn in every run with
     // this set and in fewer than half without it).
     *ON.get_or_init(|| relay() && std::env::var_os("VICTORY_RELAY").is_none_or(|v| v == "2"))
+}
+
+/// For the frametime dump's header: whether submissions overlap the card
+/// in this run. `VICTORY_GPU_TIMING` turns [`late`] off, so a dump taken
+/// with it measures every submission waited for on its own.
+pub(crate) fn overlap_summary() -> String {
+    let relay = match (relay(), relay_exact()) {
+        (false, _) => "off",
+        (true, false) => "1",
+        (true, true) => "2",
+    };
+    let timing = if std::env::var_os("VICTORY_GPU_TIMING").is_some() {
+        " (VICTORY_GPU_TIMING is set: late waits and the relay are off, every submission is waited for)"
+    } else {
+        ""
+    };
+    format!("late stage {}, relay {relay}{timing}", late_stage())
 }
 
 /// Told when something joins [`LINE`], for the thread that lands flights
@@ -6152,7 +6171,7 @@ impl Meter {
             "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame"
         );
         late_line(frames);
-        card_clock_line(frames, ms);
+        let (card_idle_ms, card_busy_pct) = card_clock_line(frames, ms);
         crate::shadow::back_line(frames);
         let [card_passes, card_pieces, card_compares] =
             [0, 1, 2].map(|i| CARD_PASSES[i].swap(0, Ordering::Relaxed) as f64 / frames);
@@ -6245,6 +6264,8 @@ impl Meter {
             depth_planes: planes,
             ram_mb: self.ram_mb,
             cpu_pct: self.cpu_pct,
+            card_idle_ms,
+            card_busy_pct,
         });
         if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
             self.logged = std::time::Instant::now();

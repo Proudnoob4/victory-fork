@@ -56,25 +56,35 @@ area used for the earlier numbers:
 |---|---:|
 | menu | **30 fps**, 13 draws, 0 dropped |
 | open world | **~9–12 fps / 83–116 ms** at ~4,900 draws |
-| denser stretch | 5–7 fps at 5,500–6,000 draws while mesh pipelines first-bind |
+| denser stretch | 5–7 fps at 5,500–6,000 draws (copy-back and preparing) |
 | copy-back | 40–57 ms |
 | preparing | 43–49 ms |
 | shader cache | **3,630 hits, 0 misses** |
 
-This is a preview, not a final benchmark. Two things dominate the gap:
+This is a preview, not a final benchmark. What dominates the gap:
 
-1. **Host mesh pipelines first-bind.** The shader cache is complete (0 misses),
-   but the host PSOs for mesh draws are made the first time an area uses them and
-   the library saves them afterwards. The first pass through an area drops those
-   draws; a second visit is smoother. We are working on pre-building the mesh
-   side the way the graphics/compute side already is.
-2. **VRAM is tight in the open world.** 11–15 GB of the 16 GB card, with 700–800
-   textures waiting at times. The interior scenes are much lighter.
+1. **The frame is CPU-bound, not GPU-bound.** Preparing is 43–49 ms and the
+   copy-back of shader-written ranges into title memory is 40–57 ms (66–74 MB a
+   frame), against 0–5 ms of GPU. The copy-back is load-bearing:
+   `VICTORY_NO_COPY_BACK=1` (skip it wholesale) renders a black screen. The way
+   down is bringing ranges back only when the title touches them — not off.
+2. **VRAM is tight in the open world.** 11–15 GB of the 16 GB card, with
+   700–800 textures waiting at times. `VICTORY_CARD_WINDOWS_MB=3072` cut the
+   waiting by ~4x at no fps cost (the summary's `dropped` was unchanged). The
+   interior scenes are much lighter.
 
-The earlier ShakiraRED V1 tree measured 17.8 fps / 56 ms at ~6,679 draws, but it
-dropped ~350–450 draws/frame as refused compute shaders. Neptune translates all
-but **5 of 25,753** shaders and **0 of 2,729** compute pipelines; the remaining gap
-is the two items above, not translation.
+About the `dropped` figure in the log: most of it was never missing pipelines.
+The ray-tracing structure builder's dispatches run all or none, and are none
+without `VICTORY_BVH_BUILDER=1` — the summary counted them as drops. This tree
+counts them separately (`structure-builder dispatches not run`), so `dropped`
+now names only draws a host pipeline could really have run. The shader cache
+itself is complete: 0 misses, and warm translates all but **5 of 25,753**
+shaders with **0 of 2,729** compute pipelines refused.
+
+The earlier ShakiraRED V1 tree measured 17.8 fps / 56 ms at ~6,679 draws, but
+dropped the whole ray-tracing builder and ~350–450 draws/frame as refused
+compute shaders. Neptune translates those; the remaining gap is the two items
+above, not translation.
 
 ### Profiles
 
